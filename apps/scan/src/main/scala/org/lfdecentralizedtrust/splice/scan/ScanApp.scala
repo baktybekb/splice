@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+  // Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package org.lfdecentralizedtrust.splice.scan
@@ -54,6 +54,7 @@ import org.lfdecentralizedtrust.splice.scan.store.{
 import org.lfdecentralizedtrust.splice.scan.sequencer.SequencerTrafficClient
 import org.lfdecentralizedtrust.splice.scan.store.db.{
   DbAppActivityRecordStore,
+  DbScanAppRewardsStore,
   DbScanVerdictStore,
   ScanAggregatesReader,
   ScanAggregatesReaderContext,
@@ -260,21 +261,6 @@ class ScanApp(
         config.parameters.spliceCachingConfigs.physicalSynchronizerExpiration,
         loggerFactory,
       )
-      automation = new ScanAutomationService(
-        config,
-        clock,
-        ledgerClient,
-        retryProvider,
-        loggerFactory,
-        store,
-        updateHistory,
-        storage,
-        acsSnapshotStore,
-        serviceUserPrimaryParty,
-        svName,
-        amuletAppParameters.upgradesConfig,
-        initialRound.toLong,
-      )
       kvStore <- ScanKeyValueStore(dsoParty, participantId, storage, loggerFactory)
       kvProvider = new ScanKeyValueProvider(kvStore, loggerFactory)
       bulkStorage = BulkStorage(
@@ -307,10 +293,31 @@ class ScanApp(
           Some(
             new DbAppActivityRecordStore(
               storage,
+              updateHistory,
               loggerFactory,
             )
           )
         } else None
+      appRewardsStoreO = appActivityRecordStoreO.map(appActivityRecordStore =>
+        new DbScanAppRewardsStore(storage, updateHistory, appActivityRecordStore, loggerFactory)
+      )
+      automation = new ScanAutomationService(
+        config,
+        clock,
+        ledgerClient,
+        retryProvider,
+        loggerFactory,
+        store,
+        updateHistory,
+        appRewardsStoreO,
+        appActivityRecordStoreO,
+        storage,
+        acsSnapshotStore,
+        serviceUserPrimaryParty,
+        svName,
+        amuletAppParameters.upgradesConfig,
+        initialRound.toLong,
+      )
       scanVerdictStore = DbScanVerdictStore(
         storage,
         updateHistory,
@@ -403,6 +410,8 @@ class ScanApp(
         syncService,
         automation,
         updateHistory,
+        appRewardsStoreO,
+        appActivityRecordStoreO,
         acsSnapshotStore,
         scanEventStore,
         bulkStorage,
