@@ -2953,6 +2953,7 @@ class HttpScanHandler(
                   roundNumber = roundTotal.roundNumber,
                   totalAppActivityWeight = roundTotal.totalRoundAppActivityWeight,
                   activePartiesCount = roundTotal.activeAppProviderPartiesCount,
+                  activityRecordsCount = roundTotal.activityRecordsCount,
                 )
               )
           }
