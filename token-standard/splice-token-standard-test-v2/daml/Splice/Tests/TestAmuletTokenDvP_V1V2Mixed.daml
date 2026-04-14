@@ -217,19 +217,23 @@ bilateralDvPWithFeeTest TestEnvironment{..} =
 bilateralDvPWithFeeTest_onlyV2 = runTest $ \env ->
   bilateralDvPWithFeeTest env
 
-{- FIXME: convert to V1 wallets
-bilateralDvPWithFeeTest_onlyV2_venueAutoReceipt = runTest $ \env@TestEnvironment{..} ->
+
+{- TODO(#4818): once TestTokenV2 has V1 API support also build the tests below
+
+bilateralDvPWithFeeTest_aliceV1 = runTest $ \env@TestEnvironment{..} ->
   (bilateralDvPWithFeeTest env) with
-    partiesWithAutoReceipt = [venue]
+    partiesWithV1Wallet = [alice]
     expectedNumAllocationsV1 = 0
     expectedNumAllocationsV2 = 4
 
-bilateralDvPWithFeeTest_onlyV2_venueBobAutoReceipt = runTest $ \env@TestEnvironment{..} ->
+bilateralDvPWithFeeTest_bobV1 = runTest $ \env@TestEnvironment{..} ->
   (bilateralDvPWithFeeTest env) with
-    partiesWithAutoReceipt = [venue, bob]
+    partiesWithV1Wallet = [bob]
     expectedNumAllocationsV1 = 0
     expectedNumAllocationsV2 = 4
     partiesWithSettlementAgreements = [bob]
+
+bilateralDvPWithFeeTest_onlyV1  = error "implement"
 -}
 
 bilateralDvPWithFeeTest_onlyV2_cancel = runTest $ \env@TestEnvironment{..} ->
@@ -317,12 +321,16 @@ multiDvPWithFeeTest_alice_v1 = runTest $ \env@TestEnvironment{..} ->
     expectedNumAllocationsV1 = 1  -- allocation for bobToAliceX1
     expectedNumAllocationsV2 = 3  -- alice's V1 wallet does not create a receipt allocation
 
-{-
-multiDvPWithFeeTest_onlyV2_venueBobAutoReceipt = runTest $ \env@TestEnvironment{..} ->
+{- TODO(#4818): once TestTokenV2 has V1 API support also build the two tests below
+
+multiDvPWithFeeTest_bob_v1 = runTest $ \env@TestEnvironment{..} ->
   (multiDvPWithFeeTest env) with
     partiesWithAutoReceipt = [venue, bob]
     expectedNumAllocationsV1 = 1
     expectedNumAllocationsV2 = 4
+
+multiDvPWithFeeTest_onlyV1 = error "implement"
+
 -}
 
 multiDvPWithFeeTest_onlyV2_cancel = runTest $ \env@TestEnvironment{..} ->
