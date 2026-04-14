@@ -170,7 +170,6 @@ template OTCTrade with
 
               -- For V2 settlement, the _SettleBatch choice itself checks that the allocations match the legs
               result <- exercise factoryCid V2.SettlementFactory_SettleBatch with
-                extraReceiptAuthorizers = []
                 settlement
                 transferLegs
                 allocationCids = allocationCids <> receiptAllocCids

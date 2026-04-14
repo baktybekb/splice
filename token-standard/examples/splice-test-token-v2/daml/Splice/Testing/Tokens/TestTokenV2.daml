@@ -232,13 +232,8 @@ template TokenRules with
               extraArgs = arg0.extraArgs with
                 context = ChoiceContext with
                   values = textMapSingleton tokenRulesContextKey (AV_ContractId (coerceContractId self))
-            createReceiptAllocation =
-              settlementFactoryV2_defaultCreateReceiptAllocation
-                (coerceContractId self)
-                (\account -> [account.owner])
-                arg
         in
-          settlementFactoryV2_settleBatchDefaultImpl createReceiptAllocation this self arg
+          settlementFactoryV2_settleBatchDefaultImpl admin self arg
 
       -- no extra observers to avoid leaking the settlement of different allocations to the other authorizers
       settlementFactory_settleBatchExtraObservers _arg = []

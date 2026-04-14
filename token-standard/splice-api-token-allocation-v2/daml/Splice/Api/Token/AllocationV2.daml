@@ -373,16 +373,6 @@ interface SettlementFactory where
         --  - the `transferLegs` cover exactly the transfers authorized by the
         --    allocations
         --
-      extraReceiptAuthorizers : [Account]
-        -- ^ The accounts for which missing receipt allocations should be
-        -- automatically created as part of the settlement.
-        --
-        -- Use for V1 compatibility, where only senders create allocations.
-        -- Can also be used in V2 as a performance optimization.
-        --
-        -- Implementations MUST check that the parties required to authorize
-        -- the receipt are part of the `actors` exercising the choice to avoid
-        -- unauthorized settlement execution.
       actors : [Party]
         -- ^ Allows setting non-default controllers for settling the batch, which
         -- can be used for implementation specific authorization patterns.
@@ -393,7 +383,6 @@ interface SettlementFactory where
         --
         --  - the `settlement.executors`
         --  - the `extraSettlementAuthorizers` required by the allocations being settled
-        --  - the parties required to authorize the receipt into the `extraReceiptAuthorizers` accounts
         --
         -- They SHOULD not require additional actors to maximize compatibility with apps.
       extraArgs : ExtraArgs

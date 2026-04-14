@@ -223,7 +223,6 @@ querySettleableTrades registries venue = do
                   transferLegs = requiredLegs
                   allocationCids
                   extraArgs = emptyExtraArgs
-                  extraReceiptAuthorizers = []
                   actors = [venue]
             context <- RegistryApiV2.getSettlementFactory registry settleBatchArg
             let batch = SettlementBatchV2 with
