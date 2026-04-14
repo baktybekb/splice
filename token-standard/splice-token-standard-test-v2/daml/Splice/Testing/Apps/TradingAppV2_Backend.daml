@@ -165,7 +165,15 @@ querySettleableTrades registries venue = do
             let extraArgs = ExtraArgs with
                   context = context.choiceContext
                   meta = emptyMetadata
-            pure ((allocView.allocation.transferLegId, (allocCid, extraArgs)), context.disclosures)
+            let transferLeg = allocView.allocation.transferLeg
+            senderAgreementCid <- getSettlementAgreement venue transferLeg.sender
+            receiverAgreementCid <- getSettlementAgreement venue transferLeg.receiver
+            let allocationWithContext = AllocationWithContextV1 with
+                  allocationCid = allocCid
+                  extraArgs
+                  senderAgreementCid
+                  receiverAgreementCid
+            pure ((allocView.allocation.transferLegId, allocationWithContext), context.disclosures)
           let batch = SettlementBatchV1 with
                 allocationsWithContext = TextMap.fromList $ map fst richAllocationsWithContext
               disclosures = foldMap snd richAllocationsWithContext
@@ -247,10 +255,18 @@ cancelWithTradeAgreements registries trade = do
     let admin = allocView.allocation.transferLeg.instrumentId.admin
     registry <- MultiRegistry.getRegistryApiV1 registries admin
     context <- RegistryApiV1.getAllocation_CancelContext registry allocCid emptyMetadata
-    let extraArgs = ExtraArgs with
-          context = context.choiceContext
-          meta = emptyMetadata
-    pure ((allocCid, extraArgs), context.disclosures)
+    let transferLeg = allocView.allocation.transferLeg
+    let venue = trade.otcTrade.venue
+    senderAgreementCid <- getSettlementAgreement venue transferLeg.sender
+    receiverAgreementCid <- getSettlementAgreement venue transferLeg.receiver
+    let allocationWithContext = AllocationWithContextV1 with
+          allocationCid = allocCid
+          extraArgs = ExtraArgs with
+            context = context.choiceContext
+            meta = emptyMetadata
+          senderAgreementCid
+          receiverAgreementCid
+    pure (allocationWithContext, context.disclosures)
   -- grab contexts for V2 allocation cancellation
   allocationsWithContextV2 <- forA trade.allocationsV2 $ \(allocCid, allocView) -> do
     registry <- MultiRegistry.getRegistryApiV2 registries (allocationAdmin allocView.allocation)
@@ -284,3 +300,11 @@ cancelWithTradeAgreements registries trade = do
           cancelArg
           settlementAgreementCids = agreementCids
           authorizingTraders = []
+
+
+getSettlementAgreement : Party -> Party -> Script (ContractId TradeSettlementAgreement)
+getSettlementAgreement venue trader = do
+  agreements <- queryFilter @TradeSettlementAgreement venue (\a -> a.trader == trader)
+  case agreements of
+    [] -> error $ "No settlement agreement found for trader " <> show trader
+    (agreementCid, _) :: _ -> pure agreementCid

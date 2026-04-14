@@ -57,12 +57,19 @@ template OTCTradeAllocationRequest with
       allocationRequest_rejectImpl = allocationRequestV2_rejectDefaultImplUsingV1 [[p] | p <- accountParties authorizer]
       allocationRequest_withdrawImpl = allocationRequestV2_withdrawDefaultImplUsingV1 (toInterface this)
 
+-- | A V1 allocation with enough context to settle or cancel it.
+data AllocationWithContextV1 = AllocationWithContextV1 with
+    allocationCid : ContractId V1.Allocation
+    extraArgs : ExtraArgs
+    senderAgreementCid : ContractId TradeSettlementAgreement
+    receiverAgreementCid : ContractId TradeSettlementAgreement
+  deriving (Eq, Show)
 
 -- | A batch of allocations for the same admin together with the extra arguments required to settle them.
 data SettlementBatch
   = -- | Batch for V1-only admins
     SettlementBatchV1 with
-      allocationsWithContext : TextMap.TextMap (ContractId V1.Allocation, ExtraArgs)
+      allocationsWithContext : TextMap.TextMap AllocationWithContextV1
   | SettlementBatchV2 with
       allocationCids : [ContractId V2.Allocation]
       factoryCid : ContractId V2.SettlementFactory
@@ -155,17 +162,21 @@ template OTCTrade with
               pure $ Right (admin, result)
 
             Some (SettlementBatchV1 with allocationsWithContext) -> do
-              -- For V1 settlement, we need to check the allocations match the legs here
+              -- For V1 settlement, we need to check that the allocations match the legs here
               let expectedAllocations = expectedTradeAllocationsV1 settlement transferLegs
               let mergedMaps = textMapZip allocationsWithContext expectedAllocations
-              results <- textMapTraverseWithKey mergedMaps \legId (optAllocWithContext,  optExpectedAlloc) -> do
-                let (allocCid, extraArgs) = fromSomeNote ("Allocation cid and extra arg is missing for leg " <> legId) optAllocWithContext
+              results <- textMapTraverseWithKey mergedMaps \legId (optSettleableAlloc,  optExpectedAlloc) -> do
+                let AllocationWithContextV1 {allocationCid, extraArgs, receiverAgreementCid, senderAgreementCid} =
+                      fromSomeNote ("Settleable allocation is missing for leg " <> legId) optSettleableAlloc
                 let expectedAlloc = fromSomeNote ("Allocation with context provided for unexpected leg " <> legId) optExpectedAlloc
                 -- fetch and validate the allocation
-                alloc <- fetch @V1.Allocation allocCid
+                alloc <- fetch @V1.Allocation allocationCid
                 let allocView = view @V1.Allocation alloc
                 requireMatchExpected ("allocation for leg " <> legId, allocView.allocation) expectedAlloc
-                exercise allocCid (V1.Allocation_ExecuteTransfer extraArgs)
+                exercise senderAgreementCid TradeSettlementAgreement_ExecuteTransferAsSender with
+                  receiverAgreementCid
+                  allocationCid
+                  extraArgs
               pure $ Left (admin, results)
 
         let (resultsByAdminV1, resultsByAdminV2) = partitionEithers results
@@ -181,7 +192,8 @@ template OTCTrade with
     -- retains the ability to cancel the allocations that are created.
     choice OTCTrade_Cancel : OTCTrade_CancelResult
       with
-        allocationsWithContextV1 : [(ContractId V1.Allocation, ExtraArgs)]
+        allocationsWithContextV1 : [AllocationWithContextV1]
+          -- ^ V1 allocations to cancel, together with the context required to cancel them.
         allocationsWithContextV2 : [(ContractId V2.Allocation, ExtraArgs)]
         allocationRequestCids : [ContractId OTCTradeAllocationRequest]
         extraSettlementAuthorizers : [Party]
@@ -195,11 +207,14 @@ template OTCTrade with
             req <- fetch reqCid
             archive reqCid
             requireMatchExpected ("AllocationRequest.settlement", req.settlement) settlementV2
-        resultsV1 <- forA allocationsWithContextV1 $ \(allocCid, extraArgs) -> do
-            alloc <- fetch allocCid
+        resultsV1 <- forA allocationsWithContextV1 $ \allocWithContext -> do
+            let AllocationWithContextV1 {allocationCid, extraArgs, senderAgreementCid, receiverAgreementCid} = allocWithContext
+            alloc <- fetch allocationCid
             let allocation = (view alloc).allocation
             requireMatchExpected ("Allocation.settlement", allocation.settlement) settlementV1
-            result <- exercise allocCid $ V1.Allocation_Cancel with
+            result <- exercise senderAgreementCid TradeSettlementAgreement_CancelAsSender with
+              receiverAgreementCid
+              allocationCid
               extraArgs
             pure (allocation, result)
         resultsV2 <- forA allocationsWithContextV2 $ \(allocCid, extraArgs) -> do
@@ -268,6 +283,75 @@ template TradeSettlementAgreement with
     trader : Party
   where
     signatory venue, trader
+
+    nonconsuming choice TradeSettlementAgreement_ExecuteTransferAsSender : V1.Allocation_ExecuteTransferResult
+      with
+        receiverAgreementCid : ContractId TradeSettlementAgreement
+        allocationCid : ContractId V1.Allocation
+        extraArgs : ExtraArgs
+      controller venue
+      do
+        alloc <- fetch allocationCid
+        receiverAgreement <- fetch receiverAgreementCid
+        let allocation = (view alloc).allocation
+        -- FIXME: share with cancel, here and for receiver
+        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
+        require' ("receiverAgreement.venue", receiverAgreement.venue) isEqualR ("venue", venue)
+        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("trader", trader)
+        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver)
+          isEqualR ("receiverAgreement.trader", receiverAgreement.trader)
+        exercise receiverAgreementCid TradeSettlementAgreement_ExecuteTransferAsReceiver with
+          sender = trader
+          allocationCid
+          extraArgs
+
+    nonconsuming choice TradeSettlementAgreement_ExecuteTransferAsReceiver : V1.Allocation_ExecuteTransferResult
+      with
+        sender : Party
+        allocationCid : ContractId V1.Allocation
+        extraArgs : ExtraArgs
+      controller venue, sender
+      do
+        alloc <- fetch allocationCid
+        let allocation = (view alloc).allocation
+        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
+        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("sender", sender)
+        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver) isEqualR ("trader", trader)
+        exercise allocationCid (V1.Allocation_ExecuteTransfer extraArgs)
+
+    nonconsuming choice TradeSettlementAgreement_CancelAsSender : V1.Allocation_CancelResult
+      with
+        receiverAgreementCid : ContractId TradeSettlementAgreement
+        allocationCid : ContractId V1.Allocation
+        extraArgs : ExtraArgs
+      controller venue
+      do
+        alloc <- fetch allocationCid
+        receiverAgreement <- fetch receiverAgreementCid
+        let allocation = (view alloc).allocation
+        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
+        require' ("receiverAgreement.venue", receiverAgreement.venue) isEqualR ("venue", venue)
+        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("trader", trader)
+        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver)
+          isEqualR ("receiverAgreement.trader", receiverAgreement.trader)
+        exercise receiverAgreementCid TradeSettlementAgreement_CancelAsReceiver with
+          sender = trader
+          allocationCid
+          extraArgs
+
+    nonconsuming choice TradeSettlementAgreement_CancelAsReceiver : V1.Allocation_CancelResult
+      with
+        sender : Party
+        allocationCid : ContractId V1.Allocation
+        extraArgs : ExtraArgs
+      controller venue, sender
+      do
+        alloc <- fetch allocationCid
+        let allocation = (view alloc).allocation
+        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
+        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("sender", sender)
+        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver) isEqualR ("trader", trader)
+        exercise allocationCid (V1.Allocation_Cancel extraArgs)
 
     nonconsuming choice TradeSettlementAgreement_OTCTrade_Settle : OTCTrade_SettleResult
       with
