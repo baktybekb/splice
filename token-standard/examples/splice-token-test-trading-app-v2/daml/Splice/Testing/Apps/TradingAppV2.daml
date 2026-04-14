@@ -18,6 +18,7 @@ import Splice.Api.Token.MetadataV1
 import Splice.Api.Token.AllocationRequestV1 qualified as V1
 import Splice.Api.Token.AllocationV1 qualified as V1
 import Splice.Api.Token.AllocationV2 qualified as V2
+import Splice.Api.Token.AllocationInstructionV2 qualified as V2
 import Splice.Api.Token.AllocationRequestV2 qualified as V2
 import Splice.Api.Token.HoldingV2 qualified as V2
 
@@ -65,6 +66,13 @@ data AllocationWithContextV1 = AllocationWithContextV1 with
     receiverAgreementCid : ContractId TradeSettlementAgreement
   deriving (Eq, Show)
 
+data MissingAllocation = MissingAllocation with
+    authorizerAgreementCid : Optional (ContractId TradeSettlementAgreement)
+      -- ^ None for missing allocations of the venue itself.
+    factoryCid : ContractId V2.AllocationFactory
+    choiceArg : V2.AllocationFactory_Allocate
+  deriving (Eq, Show)
+
 -- | A batch of allocations for the same admin together with the extra arguments required to settle them.
 data SettlementBatch
   = -- | Batch for V1-only admins
@@ -72,6 +80,13 @@ data SettlementBatch
       allocationsWithContext : TextMap.TextMap AllocationWithContextV1
   | SettlementBatchV2 with
       allocationCids : [ContractId V2.Allocation]
+      missingAllocations : [MissingAllocation]
+       -- ^ Allocations that should be created as part of settlement.
+       --
+       -- These are:
+       --   - the allocation(s) of the venue to receive fees
+       --   - the allocations for the receipt of V2 assets for traders that use V1 wallets,
+       --     which do not create receipt allocations on their own
       factoryCid : ContractId V2.SettlementFactory
       extraArgs : ExtraArgs
   deriving (Eq, Show)
@@ -84,10 +99,6 @@ template OTCTrade with
     createdAt : Time -- ^ When the matched trade was created on-ledger.
     settleAt : Time -- ^ When the trade should be settled by.
     settlementDeadline : Optional Time -- ^ Deadline for when the settlement should be completed.
-    autoReceiptAuthorizers : [Party]
-      -- ^ Parties that will authorize receipt into their basic accounts
-      -- directly as part of settlement and thus do not require the creation of
-      -- an allocation for the receipt of the transfer.
   where
     signatory venue
 
@@ -96,18 +107,11 @@ template OTCTrade with
       controller venue
       do
         let settlement = mkOtcTradeSettlementInfo self this
-        results <- forA (Map.toList $ splitLegsByAuthorizer transferLegs) $ \(authorizer, transferLegs) -> do
-          let noRequestRequired =
-                authorizer `elem` map basicAccount autoReceiptAuthorizers &&
-                all (\leg -> leg.sender /= authorizer) transferLegs
-          if noRequestRequired
-            then pure None
-            else do
-              Some <$> create OTCTradeAllocationRequest with
-                authorizer
-                settlement
-                transferLegs
-        pure (catOptionals results)
+        forA (Map.toList $ splitLegsByAuthorizer transferLegs) $ \(authorizer, transferLegs) -> do
+          create OTCTradeAllocationRequest with
+            authorizer
+            settlement
+            transferLegs
 
     choice OTCTrade_Settle : OTCTrade_SettleResult
       with
@@ -150,13 +154,26 @@ template OTCTrade with
           case Map.lookup admin batchesByAdmin of
             None -> abort $ "No settlement batch found for admin " <> show admin
 
-            Some (SettlementBatchV2 with factoryCid; allocationCids; extraArgs) -> do
+            Some (SettlementBatchV2 with factoryCid; allocationCids; extraArgs; missingAllocations) -> do
+              -- Create missing receipt allocations
+              receiptAllocCids <- forA missingAllocations $ \missingAlloc ->
+                case missingAlloc.authorizerAgreementCid of
+                  None -> do
+                    result <- exercise missingAlloc.factoryCid missingAlloc.choiceArg
+                    extractAllocationCidFromResult result
+                  Some agreementCid -> do
+                    -- This is a receipt allocation for a trader that still has
+                    -- a V1 wallet ==> use their agreement to create the allocation on their behalf
+                    exercise agreementCid TradeSettlementAgreement_CreateReceiptAllocation with
+                      factoryCid = missingAlloc.factoryCid
+                      choiceArg = missingAlloc.choiceArg
+
               -- For V2 settlement, the _SettleBatch choice itself checks that the allocations match the legs
               result <- exercise factoryCid V2.SettlementFactory_SettleBatch with
-                extraReceiptAuthorizers = map basicAccount autoReceiptAuthorizers
+                extraReceiptAuthorizers = []
                 settlement
                 transferLegs
-                allocationCids = allocationCids
+                allocationCids = allocationCids <> receiptAllocCids
                 actors = venue :: extraSettlementAuthorizers
                 extraArgs = extraArgs
               pure $ Right (admin, result)
@@ -353,6 +370,35 @@ template TradeSettlementAgreement with
         require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver) isEqualR ("trader", trader)
         exercise allocationCid (V1.Allocation_Cancel extraArgs)
 
+    nonconsuming choice TradeSettlementAgreement_CreateReceiptAllocation : ContractId V2.Allocation
+      with
+        factoryCid : ContractId V2.AllocationFactory
+        choiceArg : V2.AllocationFactory_Allocate
+      controller venue
+      do
+        -- FIXME: share from TSU
+        let (V2.AllocationFactory_Allocate with allocation; requestedAt; inputHoldingCids; extraArgs; actors) = choiceArg
+        let (ExtraArgs with context; meta) = extraArgs
+        let (V2.AllocationSpecification with settlement; transferLegs; authorizer) = allocation
+        -- only delegate receipt creation for the trader's basic account
+        require' ("choiceArg.allocation.authorizer", authorizer) isEqualR ("basicAccount(trader)", basicAccount(trader))
+        -- restrict to single actor choices with the trader as the actor
+        require' ("choiceArg.actors", actors) isEqualR ("trader", [trader])
+        -- require all transfer legs to be receipts
+        forA_ transferLegs $ \leg -> do
+          let legName = "transferLeg[" <> leg.transferLegId <> "]"
+          require' (legName <> ".receiver", leg.receiver) isEqualR ("authorizer", authorizer)
+          -- avoid accidental delegation of authority for non-receipt legs
+          require' (legName <> ".sender.owner", leg.sender.owner) (notR isEqualR) ("trader", trader)
+          require' (legName <> ".sender.provider", leg.sender.provider) (notR isEqualR) ("trader", Some trader)
+        -- no holdings for funding
+        require' ("choiceArg.inputHoldingCids", inputHoldingCids) isEqualR ("emptyList", [])
+        -- no extra metadata to avoid accidental delegation over special functionality
+        require' ("choiceArg.extraArgs.meta", meta) isEqualR ("emptyMetadata", emptyMetadata)
+        -- create the receipt allocation
+        result <- exercise factoryCid choiceArg
+        extractAllocationCidFromResult result
+
     nonconsuming choice TradeSettlementAgreement_OTCTrade_Settle : OTCTrade_SettleResult
       with
         tradeCid : ContractId OTCTrade
@@ -425,3 +471,12 @@ useOrAddAuthority venue trader settlementAgreementCids authorizingTraders useAut
       requireMatchExpected ("settlementAgreement.venue", settlementAgreement.venue) venue
       addAuthority cid cids newAuthorizingTraders
 
+
+extractAllocationCidFromResult : V2.AllocationInstructionResult -> Update (ContractId V2.Allocation)
+extractAllocationCidFromResult result =
+  case result.output of
+    V2.AllocationInstructionResult_Completed allocCid -> pure allocCid
+    V2.AllocationInstructionResult_Pending _ ->
+      abort "Receipt allocation with multi-step allocation workflows is not supported"
+    V2.AllocationInstructionResult_Failed ->
+      abort $ "Failed to create receipt allocation with " <> show result.meta
