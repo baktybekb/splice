@@ -255,12 +255,7 @@ settlementFactoryV2_settleBatchDefaultImpl
   -> Update AllocationV2.SettlementFactory_SettleBatchResult
 settlementFactoryV2_settleBatchDefaultImpl admin self arg= do
   let AllocationV2.SettlementFactory_SettleBatch {..} = arg
-  -- check that executors are part of the actors
-  -- additional actors are allowed, and are implicitly checked via authorization context in all steps that require authority
-  require'
-    ("settlement.executors", settlement.executors)
-    isSubsetOfR
-    ("SettlementFactory_SettleBatch.actors", actors)
+  checkActors actors [settlement.executors]
 
   -- validate call to factory and retrieve context
   allocations <- fetchAndValidateAllocations admin arg
@@ -294,10 +289,6 @@ fetchAndValidateAllocations admin AllocationV2.SettlementFactory_SettleBatch{..}
     let allocation = allocationView.allocation
 
     requireMatchExpected ("allocation.settlement", allocation.settlement) settlement
-    require'
-      ("allocation.extraSettlementAuthorizers", allocationView.extraSettlementAuthorizers)
-      isSubsetOfR
-      ("SettlementFactory_SettleBatch.actors", actors)
     forA_ allocation.transferLegs $ \leg -> do
       requireMatchExpected ("transferLeg.instrumentId.admin", leg.instrumentId.admin) admin
     pure (allocationCid, allocationView)
@@ -409,7 +400,6 @@ upcast_v1_v2_Allocation originalAllocationCid availableActions (AllocationV1.All
     allocation = upcast allocation
     holdingCids = map upcast holdingCids
     expiresAt = Some (allocation.settlement.settleBefore)
-    extraSettlementAuthorizers = [allocation.transferLeg.sender, allocation.transferLeg.receiver]
     availableActions
     meta
 
@@ -424,14 +414,13 @@ allocationV1_availableActionsDefault allocView = Map.fromList
     leg = allocation.transferLeg
 
 -- | Available actions for a V2 allocation that uses the default controllers for its actions.
-allocationV2_availableActionsDefault : AllocationV2.AllocationSpecification -> [Party] -> Map.Map [Party] [AllocationV2.AllocationAction]
-allocationV2_availableActionsDefault allocation extraSettlementAuthorizers = Map.fromList
+allocationV2_availableActionsDefault : AllocationV2.AllocationSpecification -> Map.Map [Party] [AllocationV2.AllocationAction]
+allocationV2_availableActionsDefault allocation = Map.fromList
   [ ([allocation.authorizer.owner], [AllocationV2.AA_Withdraw])
-  , (dedupSort settlementControllers, [AllocationV2.AA_Cancel])
-  , (dedupSort (admin :: settlementControllers), [AllocationV2.AA_Settle])
+  , (dedupSort allocation.settlement.executors, [AllocationV2.AA_Cancel])
+  , (dedupSort (admin :: allocation.settlement.executors), [AllocationV2.AA_Settle])
   ]
   where
-    settlementControllers = allocation.settlement.executors <> extraSettlementAuthorizers
     admin = case allocation.transferLegs of
       leg :: _ -> leg.instrumentId.admin
       [] -> error "unexpected: allocation with no transfer legs"

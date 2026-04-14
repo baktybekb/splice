@@ -57,8 +57,7 @@ template AmuletAllocationV2
         holdingCids = case lockedAmulet of
           None -> mempty
           Some cid -> [toInterfaceContractId cid]
-        extraSettlementAuthorizers = []
-        availableActions = allocationV2_availableActionsDefault allocation []
+        availableActions = allocationV2_availableActionsDefault allocation
         meta = emptyMetadata
 
       -- No extra observers required, as the choice bodies do not introduce further informees.

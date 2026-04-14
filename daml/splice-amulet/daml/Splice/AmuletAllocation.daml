@@ -92,7 +92,7 @@ template AmuletAllocation
         -- V2 settlement of a V1 allocation
         let leg = allocation.transferLeg
         let dso = leg.instrumentId.admin
-        archiveAndCheckActors self arg.actors [[dso, allocation.settlement.executor, leg.sender, leg.receiver]]
+        archiveAndCheckActors self arg.actors [[dso, allocation.settlement.executor]]
         -- Archive locked amulet to execute the debit (extra checks part of defensive programming)
         la <- fetchAndArchive (ForOwner with dso, owner = leg.sender) lockedAmulet
         requireMatchExpected ("lockedAmulet.amount", la.amulet.amount.initialAmount) leg.amount

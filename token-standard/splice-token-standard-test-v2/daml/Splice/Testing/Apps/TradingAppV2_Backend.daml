@@ -21,10 +21,8 @@ import Daml.Script
 import DA.Action
 import DA.Foldable (foldMap)
 import DA.Map as Map hiding (filter)
-import DA.List (dedupOn)
 import DA.Optional
 import DA.Set qualified as Set
-import DA.Text qualified as T
 import DA.TextMap qualified as TextMap
 
 import Splice.Api.Token.MetadataV1
@@ -53,7 +51,6 @@ data TradeWithAllocations = TradeWithAllocations
       -- ^ Allocations that implement the V2 token standard
     allocationsV1 : [(ContractId V1.Allocation, V1.AllocationView)]
       -- ^ V1-only allocations
-    extraSettlementAuthorizers : Set.Set Party
     allocationRequestCids : [ContractId OTCTradeAllocationRequest]
   deriving (Eq, Show)
 
@@ -62,7 +59,6 @@ data SettleableTrade = SettleableTrade with
     otcTrade : OTCTrade
     disclosures : Disclosures'
     batchesByAdmin : Map Party SettlementBatch
-    extraSettlementAuthorizers : Set.Set Party
     allocationRequestCids : [ContractId OTCTradeAllocationRequest]
 
 -- | Helper type of a transfer leg together with its authorizer.
@@ -106,15 +102,6 @@ queryTradesWithAllocations venue = do
       allocationsV1
       allocationsV2
       allocationRequestCids = map fst allocationRequests
-      extraSettlementAuthorizers = mconcat
-        [ mconcat do
-            (_cid, allocView) <- allocationsV1
-            let leg = allocView.allocation.transferLeg
-            pure (Set.fromList [leg.sender, leg.receiver])
-        , mconcat do
-            (_cid, allocView) <- allocationsV2
-            pure (Set.fromList allocView.extraSettlementAuthorizers)
-        ]
 
 -- | Find all trades for the venue that can be settled.
 querySettleableTrades : MultiRegistry.MultiRegistry -> Party -> Script [SettleableTrade]
@@ -202,7 +189,6 @@ querySettleableTrades registries venue = do
             missingAllocations <- forA (Map.toList missingByAuthorizer) $ \(authorizer, missingLegs) -> do
               unless (isBasicAccount authorizer || authorizer.owner == trade.otcTrade.venue) $
                 fail $ "unexpected internal failure: missing authorizer is a non-basic account " <> show authorizer
-              let choiceArg = V2.AllocationFactory_Allocate
               enrichedChoice <- RegistryApiV2.getAllocationFactory registry V2.AllocationFactory_Allocate with
                 allocation = V2.AllocationSpecification with
                   transferLegs = map snd missingLegs
@@ -238,42 +224,18 @@ querySettleableTrades registries venue = do
         otcTrade
         disclosures = foldMap (._2) settleBatchContexts
         batchesByAdmin = Map.fromList $ map (._1) settleBatchContexts
-        extraSettlementAuthorizers = trade.extraSettlementAuthorizers
         allocationRequestCids = trade.allocationRequestCids
 
 -- | Settle a trade using the trade agreements for the required extra authority.
 settleWithTradeAgreements : SettleableTrade -> Script OTCTrade_SettleResult
 settleWithTradeAgreements trade = do
   let venue = trade.otcTrade.venue
-  let extraAuthorizers = Set.delete venue $ trade.extraSettlementAuthorizers
   let settleArg = OTCTrade_Settle with
         batchesByAdmin = trade.batchesByAdmin
         allocationRequests = trade.allocationRequestCids
-        extraSettlementAuthorizers = Set.toList extraAuthorizers
 
-  if Set.null extraAuthorizers
-    then do
-      -- settle directly if no extra authorizations are required
-      submitWithDisclosures' venue trade.disclosures $ exerciseCmd trade.otcTradeCid settleArg
-    else do
-      -- find agreements and use them to add the required authorization
-      agreements <- queryFilter @TradeSettlementAgreement venue (\a -> a.trader `Set.member` extraAuthorizers)
-      -- exercise settlement using the agreements as authorization
-      unless (extraAuthorizers == Set.fromList (map (._2.trader) agreements)) $
-        fail $ T.unlines
-          [ "Not all required extra authorizers have a settlement agreement."
-          , "Required extra authorizers: " <> show extraAuthorizers
-          , "Traders with settlement agreements: " <> show (map (._2.trader) agreements)
-          ]
-      case map fst agreements of
-       [] -> error "impossible, as extraAuthorizers is not empty"
-       agreementCid :: agreementCids -> do
-          submitWithDisclosures' venue trade.disclosures $
-            exerciseCmd agreementCid TradeSettlementAgreement_OTCTrade_Settle with
-              tradeCid = trade.otcTradeCid
-              settleArg
-              settlementAgreementCids = agreementCids
-              authorizingTraders = []
+  -- settle directly if no extra authorizations are required
+  submitWithDisclosures' venue trade.disclosures $ exerciseCmd trade.otcTradeCid settleArg
 
 -- | Cancel a trade using the trade agreements for the required extra authority for cancelling V1 allocations.
 cancelWithTradeAgreements : MultiRegistry.MultiRegistry -> TradeWithAllocations -> Script OTCTrade_CancelResult
@@ -305,30 +267,14 @@ cancelWithTradeAgreements registries trade = do
     pure ((allocCid, extraArgs), context.disclosures)
 
   let venue = trade.otcTrade.venue
-  let extraAuthorizers = trade.extraSettlementAuthorizers
   let cancelArg = OTCTrade_Cancel with
         allocationsWithContextV1 = map fst allocationsWithContextV1
         allocationsWithContextV2 = map fst allocationsWithContextV2
         allocationRequestCids = trade.allocationRequestCids
-        extraSettlementAuthorizers = Set.toList trade.extraSettlementAuthorizers
   let disclosures = foldMap snd allocationsWithContextV1 <> foldMap snd allocationsWithContextV2
 
-  if Set.null extraAuthorizers
-    then do
-      -- cancel directly if no extra authorizations are required
-      submitWithDisclosures' venue disclosures $ exerciseCmd trade.otcTradeCid cancelArg
-    else do
-      -- find agreements and use them to add the required authorization
-      agreements <- queryFilter @TradeSettlementAgreement venue (\a -> a.trader `Set.member` extraAuthorizers)
-      let agreementCid :: agreementCids =
-            map (._1) $ dedupOn (._2.trader) agreements -- gracefully handle duplicate agreements if they exist
-      submitWithDisclosures' venue disclosures $
-        exerciseCmd agreementCid TradeSettlementAgreement_OTCTrade_Cancel with
-          tradeCid = trade.otcTradeCid
-          cancelArg
-          settlementAgreementCids = agreementCids
-          authorizingTraders = []
-
+  -- cancel directly if no extra authorizations are required
+  submitWithDisclosures' venue disclosures $ exerciseCmd trade.otcTradeCid cancelArg
 
 getSettlementAgreement : Party -> Party -> Script (ContractId TradeSettlementAgreement)
 getSettlementAgreement venue trader = do

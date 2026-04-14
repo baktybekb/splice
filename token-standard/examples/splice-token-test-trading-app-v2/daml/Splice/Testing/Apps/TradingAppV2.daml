@@ -10,7 +10,7 @@ module Splice.Testing.Apps.TradingAppV2 where
 import DA.Assert
 import DA.Either (partitionEithers)
 import DA.Foldable (forA_)
-import DA.Optional (catOptionals, fromSomeNote)
+import DA.Optional (fromSomeNote)
 import DA.Map qualified as Map
 import DA.TextMap qualified as TextMap
 
@@ -119,15 +119,7 @@ template OTCTrade with
           -- ^ Allocations
         allocationRequests : [ContractId OTCTradeAllocationRequest]
           -- ^ Allocation request to archive as part of settlement.
-        extraSettlementAuthorizers : [Party]
-          -- ^ Extra settlement authorizers required by the given allocations.
-          -- Mainly used to settle V1 allocations, which require sender and receiver approval
-          -- to settle.
-          --
-          -- Note: a more sophisticated app might only add the extra authority on a per-admin
-          -- basis, so that extra authorizers for assets from one admin do not see the
-          -- settlement of assets from another admin for which their authorization is not required.
-      controller venue, extraSettlementAuthorizers
+      controller venue
       do
         forA_ settlementDeadline $ \deadline ->
           assertWithinDeadline "settlementDeadline" deadline
@@ -173,7 +165,7 @@ template OTCTrade with
                 settlement
                 transferLegs
                 allocationCids = allocationCids <> receiptAllocCids
-                actors = venue :: extraSettlementAuthorizers
+                actors = [venue]
                 extraArgs = extraArgs
               pure $ Right (admin, result)
 
@@ -212,10 +204,7 @@ template OTCTrade with
           -- ^ V1 allocations to cancel, together with the context required to cancel them.
         allocationsWithContextV2 : [(ContractId V2.Allocation, ExtraArgs)]
         allocationRequestCids : [ContractId OTCTradeAllocationRequest]
-        extraSettlementAuthorizers : [Party]
-          -- ^ Extra settlement authorizers of allocations, which thus also need to approve their cancellation.
-          -- Used primarily to cancel V1 allocations, which require sender and receiver approval to cancel.
-      controller venue, extraSettlementAuthorizers
+      controller venue
       do
         let settlementV2 = mkOtcTradeSettlementInfo self this
         let settlementV1 = downcast settlementV2
@@ -238,7 +227,7 @@ template OTCTrade with
             let allocView = view alloc
             requireMatchExpected ("Allocation.settlement", allocView.allocation.settlement) settlementV2
             result <- exercise allocCid $ V2.Allocation_Cancel with
-              actors = venue :: allocView.extraSettlementAuthorizers
+              actors = [venue]
               extraArgs
             pure (allocView.allocation, result)
         pure OTCTrade_CancelResult with
@@ -376,9 +365,12 @@ template TradeSettlementAgreement with
       controller venue
       do
         -- FIXME: share from TSU
-        let (V2.AllocationFactory_Allocate with allocation; requestedAt; inputHoldingCids; extraArgs; actors) = choiceArg
-        let (ExtraArgs with context; meta) = extraArgs
+        let (V2.AllocationFactory_Allocate with allocation; requestedAt = _ignore; inputHoldingCids; extraArgs; actors) = choiceArg
+        let (ExtraArgs with context = _ignore; meta) = extraArgs
         let (V2.AllocationSpecification with settlement; transferLegs; authorizer) = allocation
+        -- only allow creation of receipt allocations for this venue
+        require' ("allocation.settlement.executor", settlement.executors) isEqualR ("venue", [venue])
+         -- only allow creation of receipt allocations for this trade
         -- only delegate receipt creation for the trader's basic account
         require' ("choiceArg.allocation.authorizer", authorizer) isEqualR ("basicAccount(trader)", basicAccount(trader))
         -- restrict to single actor choices with the trader as the actor
@@ -397,78 +389,6 @@ template TradeSettlementAgreement with
         -- create the receipt allocation
         result <- exercise factoryCid choiceArg
         extractAllocationCidFromResult result
-
-    nonconsuming choice TradeSettlementAgreement_OTCTrade_Settle : OTCTrade_SettleResult
-      with
-        tradeCid : ContractId OTCTrade
-        settleArg : OTCTrade_Settle
-        settlementAgreementCids : [ContractId TradeSettlementAgreement]
-        authorizingTraders : [Party]
-      observer settleArg.extraSettlementAuthorizers
-        -- make the final set of extra settlement authorizers see this choice to
-        -- avoid extra views
-      controller venue, authorizingTraders
-      do
-        useOrAddAuthority venue trader settlementAgreementCids authorizingTraders
-          (\finalAuthorizers -> do
-              trade <- fetch tradeCid
-              requireMatchExpected ("trade.venue", trade.venue) venue
-              require' ("final authorizing traders", finalAuthorizers) isEqualSetR ("settleArg.extraSettlementAuthorizers", settleArg.extraSettlementAuthorizers)
-              exercise tradeCid settleArg
-          )
-          (\cid cids newAuthorizingTraders -> do
-              exercise cid TradeSettlementAgreement_OTCTrade_Settle with
-                tradeCid
-                settleArg
-                settlementAgreementCids = cids
-                authorizingTraders = newAuthorizingTraders
-          )
-
-    nonconsuming choice TradeSettlementAgreement_OTCTrade_Cancel : OTCTrade_CancelResult
-      with
-        tradeCid : ContractId OTCTrade
-        cancelArg : OTCTrade_Cancel
-        settlementAgreementCids : [ContractId TradeSettlementAgreement]
-        authorizingTraders : [Party]
-      observer cancelArg.extraSettlementAuthorizers
-        -- make the final set of extra settlement authorizers see this choice to
-        -- avoid extra views
-      controller venue, authorizingTraders
-      do
-        useOrAddAuthority venue trader settlementAgreementCids authorizingTraders
-          (\finalAuthorizers -> do
-              trade <- fetch tradeCid
-              requireMatchExpected ("trade.venue", trade.venue) venue
-              require' ("final authorizing traders", finalAuthorizers) isEqualSetR ("cancelArg.extraSettlementAuthorizers", cancelArg.extraSettlementAuthorizers)
-              exercise tradeCid cancelArg
-          )
-          (\cid cids newAuthorizingTraders -> do
-              exercise cid TradeSettlementAgreement_OTCTrade_Cancel with
-                tradeCid
-                cancelArg
-                settlementAgreementCids = cids
-                authorizingTraders = newAuthorizingTraders
-          )
-
-useOrAddAuthority
-  : Party -- ^ Venue
-  -> Party -- ^ Trader
-  -> [ContractId TradeSettlementAgreement]
-  -> [Party]
-  -> ([Party] -> Update r)
-  -> (ContractId TradeSettlementAgreement ->[ContractId TradeSettlementAgreement] -> [Party] -> Update r)
-  -> Update r
-useOrAddAuthority venue trader settlementAgreementCids authorizingTraders useAuthority addAuthority = do
-  -- validate args
-  require' ("trader", trader) (notR isMemberR) ("authorizingTraders", authorizingTraders)
-  let newAuthorizingTraders = trader :: authorizingTraders
-  case settlementAgreementCids of
-    [] -> useAuthority newAuthorizingTraders
-    cid :: cids -> do
-      -- add authority from this agreement
-      settlementAgreement <- fetch cid
-      requireMatchExpected ("settlementAgreement.venue", settlementAgreement.venue) venue
-      addAuthority cid cids newAuthorizingTraders
 
 
 extractAllocationCidFromResult : V2.AllocationInstructionResult -> Update (ContractId V2.Allocation)
