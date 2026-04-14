@@ -100,3 +100,19 @@ Cleanup performed so far:
 - Introduce `AllocationRequest.originalRequestId` and `Allocation.originalAllocationId` fields, which
   are used to track the same request or allocation across state updates,
   analogously to the `originalInstructionCid` of transfer and allocation instructions.
+
+- *Drop the need for `extraSettlementAuthorizers` and `extraReceiptAuthorizers`* to use
+  allocations created using `V1.AllocationFactory_Allocate` in a V2 settlement.
+  - **motivation**: the extra actors on `SettlementFactory_SettleBatch` made it impossible to use V1 allocation with privacy,
+    which was discovered by app providers attempting to implement the compatibility mode.
+  - **key changes**:
+    - The `V2.Allocation_Settle` choice always only requires authorization from the `executors` and
+      the instrument `admin`. Apps can thus call `V2.SettlementFactory_SettleBatch` using `executors`
+      authority only.
+    - Apps need to create missing receipt allocations using their own delegation contracts from their
+      traders. See the `TradingAppV2` implementation for an example of how to do this. Also note the
+      use of `Splice.TokenStandard.Utils.ensureIsReceiptAllocation` to check
+      that the allocation factory call delegation is for a receipt allocation only.
+    - Asset owners must be aware that allocations created using `V1.AllocationFactory_Allocate` can
+      be settled with only `executor` authority. They must only create allocations for `executors`
+      that they trust to atomically settle trades involving their allocations.

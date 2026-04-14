@@ -2,6 +2,8 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | V2 amulet allocation, which can and should be settled using `V2.SettlementFactory_SettleBatch`.
+--
+-- TODO(#5024): attempt to remove this whole module in favor of implementing full V2 allocation support in AmuletAllocation
 module Splice.AmuletAllocationV2 (
   AmuletAllocationV2(..),
   netAmuletCreditAmount,
