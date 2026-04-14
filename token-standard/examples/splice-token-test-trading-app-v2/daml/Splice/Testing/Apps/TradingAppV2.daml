@@ -296,15 +296,7 @@ template TradeSettlementAgreement with
         extraArgs : ExtraArgs
       controller venue
       do
-        alloc <- fetch allocationCid
-        receiverAgreement <- fetch receiverAgreementCid
-        let allocation = (view alloc).allocation
-        -- FIXME: share with cancel, here and for receiver
-        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
-        require' ("receiverAgreement.venue", receiverAgreement.venue) isEqualR ("venue", venue)
-        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("trader", trader)
-        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver)
-          isEqualR ("receiverAgreement.trader", receiverAgreement.trader)
+        validateAllocationAsSender this receiverAgreementCid allocationCid
         exercise receiverAgreementCid TradeSettlementAgreement_ExecuteTransferAsReceiver with
           sender = trader
           allocationCid
@@ -317,11 +309,7 @@ template TradeSettlementAgreement with
         extraArgs : ExtraArgs
       controller venue, sender
       do
-        alloc <- fetch allocationCid
-        let allocation = (view alloc).allocation
-        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
-        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("sender", sender)
-        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver) isEqualR ("trader", trader)
+        validateAllocationAsReceiver this sender allocationCid
         exercise allocationCid (V1.Allocation_ExecuteTransfer extraArgs)
 
     nonconsuming choice TradeSettlementAgreement_CancelAsSender : V1.Allocation_CancelResult
@@ -331,14 +319,7 @@ template TradeSettlementAgreement with
         extraArgs : ExtraArgs
       controller venue
       do
-        alloc <- fetch allocationCid
-        receiverAgreement <- fetch receiverAgreementCid
-        let allocation = (view alloc).allocation
-        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
-        require' ("receiverAgreement.venue", receiverAgreement.venue) isEqualR ("venue", venue)
-        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("trader", trader)
-        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver)
-          isEqualR ("receiverAgreement.trader", receiverAgreement.trader)
+        validateAllocationAsSender this receiverAgreementCid allocationCid
         exercise receiverAgreementCid TradeSettlementAgreement_CancelAsReceiver with
           sender = trader
           allocationCid
@@ -351,11 +332,7 @@ template TradeSettlementAgreement with
         extraArgs : ExtraArgs
       controller venue, sender
       do
-        alloc <- fetch allocationCid
-        let allocation = (view alloc).allocation
-        require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", venue)
-        require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("sender", sender)
-        require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver) isEqualR ("trader", trader)
+        validateAllocationAsReceiver this sender allocationCid
         exercise allocationCid (V1.Allocation_Cancel extraArgs)
 
     nonconsuming choice TradeSettlementAgreement_CreateReceiptAllocation : ContractId V2.Allocation
@@ -364,29 +341,9 @@ template TradeSettlementAgreement with
         choiceArg : V2.AllocationFactory_Allocate
       controller venue
       do
-        -- FIXME: share from TSU
-        let (V2.AllocationFactory_Allocate with allocation; requestedAt = _ignore; inputHoldingCids; extraArgs; actors) = choiceArg
-        let (ExtraArgs with context = _ignore; meta) = extraArgs
-        let (V2.AllocationSpecification with settlement; transferLegs; authorizer) = allocation
-        -- only allow creation of receipt allocations for this venue
-        require' ("allocation.settlement.executor", settlement.executors) isEqualR ("venue", [venue])
-         -- only allow creation of receipt allocations for this trade
-        -- only delegate receipt creation for the trader's basic account
-        require' ("choiceArg.allocation.authorizer", authorizer) isEqualR ("basicAccount(trader)", basicAccount(trader))
-        -- restrict to single actor choices with the trader as the actor
-        require' ("choiceArg.actors", actors) isEqualR ("trader", [trader])
-        -- require all transfer legs to be receipts
-        forA_ transferLegs $ \leg -> do
-          let legName = "transferLeg[" <> leg.transferLegId <> "]"
-          require' (legName <> ".receiver", leg.receiver) isEqualR ("authorizer", authorizer)
-          -- avoid accidental delegation of authority for non-receipt legs
-          require' (legName <> ".sender.owner", leg.sender.owner) (notR isEqualR) ("trader", trader)
-          require' (legName <> ".sender.provider", leg.sender.provider) (notR isEqualR) ("trader", Some trader)
-        -- no holdings for funding
-        require' ("choiceArg.inputHoldingCids", inputHoldingCids) isEqualR ("emptyList", [])
-        -- no extra metadata to avoid accidental delegation over special functionality
-        require' ("choiceArg.extraArgs.meta", meta) isEqualR ("emptyMetadata", emptyMetadata)
-        -- create the receipt allocation
+        -- Important: validate the factory call to create a receipt allocation
+        -- to avoid accidentally delegating sending assets to the venue .
+        ensureIsReceiptAllocation [venue] trader (basicAccount trader) choiceArg
         result <- exercise factoryCid choiceArg
         extractAllocationCidFromResult result
 
@@ -399,3 +356,22 @@ extractAllocationCidFromResult result =
       abort "Receipt allocation with multi-step allocation workflows is not supported"
     V2.AllocationInstructionResult_Failed ->
       abort $ "Failed to create receipt allocation with " <> show result.meta
+
+validateAllocationAsSender : TradeSettlementAgreement -> ContractId TradeSettlementAgreement -> ContractId V1.Allocation -> Update ()
+validateAllocationAsSender this receiverAgreementCid allocationCid = do
+  alloc <- fetch allocationCid
+  receiverAgreement <- fetch receiverAgreementCid
+  let allocation = (view alloc).allocation
+  require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", this.venue)
+  require' ("receiverAgreement.venue", receiverAgreement.venue) isEqualR ("venue", this.venue)
+  require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("trader", this.trader)
+  require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver)
+    isEqualR ("receiverAgreement.trader", receiverAgreement.trader)
+
+validateAllocationAsReceiver : TradeSettlementAgreement -> Party -> ContractId V1.Allocation -> Update ()
+validateAllocationAsReceiver this sender allocationCid = do
+  alloc <- fetch allocationCid
+  let allocation = (view alloc).allocation
+  require' ("allocation.settlement.executor", allocation.settlement.executor) isEqualR ("venue", this.venue)
+  require' ("allocation.transferLeg.sender", allocation.transferLeg.sender) isEqualR ("sender", sender)
+  require' ("allocation.transferLeg.receiver", allocation.transferLeg.receiver) isEqualR ("trader", this.trader)

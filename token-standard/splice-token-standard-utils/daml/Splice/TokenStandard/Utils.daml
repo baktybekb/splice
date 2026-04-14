@@ -84,6 +84,9 @@ module Splice.TokenStandard.Utils (
   splitLegsByAdmin,
   splitLegsByAuthorizer,
 
+  -- *** Auto-creation of receipt allocations
+  ensureIsReceiptAllocation,
+
   -- ** Allocation implementation
 
   -- *** Ensures clauses

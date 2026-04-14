@@ -13,6 +13,9 @@ module Splice.TokenStandard.Utils.Internal.Allocations (
   splitLegsByAuthorizer,
   filterLegsForAccount,
 
+  -- ** Auto-creation of receipt allocations
+  ensureIsReceiptAllocation,
+
   -- * Allocation template implementations
 
   -- ** Validation for ensure clauses
@@ -170,6 +173,38 @@ isValidAllocationSpecificationV2 validInstrumentId AllocationV2.AllocationSpecif
       -- No account meta allowed on the leg for sender or receiver to avoid confusion
       validateNoAccountMeta "sender" leg.meta &&
       validateNoAccountMeta "receiver" leg.meta
+
+
+-- TODO(#4517): add negative test cases for this validation function
+
+-- | Check that the allocation factory call creates a receipt allocation for the basic account
+-- of the given trader.
+ensureIsReceiptAllocation
+  : [Party] -- ^ Expected executors of the receipt allocation
+  -> Party -- ^ Actor creating the receipt allocation
+  -> HoldingV2.Account -- ^ Account receiving the transfers
+  -> AllocationInstructionV2.AllocationFactory_Allocate
+  -> Update ()
+ensureIsReceiptAllocation executors receiver receiptAccount choiceArg = do
+  let (AllocationInstructionV2.AllocationFactory_Allocate with
+        allocation; requestedAt = _ignore; inputHoldingCids; extraArgs; actors) = choiceArg
+  let (ExtraArgs with context = _ignore; meta) = extraArgs
+  let (AllocationV2.AllocationSpecification with settlement; transferLegs; authorizer) = allocation
+  requireMatchExpected ("allocation.settlement.executor", settlement.executors) executors
+  require' ("choiceArg.allocation.authorizer", authorizer) isEqualR ("receiptAccount", receiptAccount)
+  -- restrict to single actor choices with the receiver as the actor
+  requireMatchExpected ("choiceArg.actors", actors) [receiver]
+  -- require all transfer legs to be receipts
+  forA_ transferLegs $ \leg -> do
+    let legName = "transferLeg[" <> leg.transferLegId <> "]"
+    require' (legName <> ".receiver", leg.receiver) isEqualR ("receiptAccount", receiptAccount)
+    -- avoid accidental delegation of authority for non-receipt legs
+    require' (legName <> ".sender.owner", leg.sender.owner) (notR isEqualR) ("receivingActor", receiver)
+    require' (legName <> ".sender.provider", leg.sender.provider) (notR isEqualR) ("receivingActor", Some receiver)
+  -- no holdings for funding
+  require' ("choiceArg.inputHoldingCids", inputHoldingCids) isEqualR ("emptyList", [])
+  -- no extra metadata to avoid accidental delegation over special functionality
+  require' ("choiceArg.extraArgs.meta", meta) isEqualR ("emptyMetadata", emptyMetadata)
 
 
 -- Allocation choices
